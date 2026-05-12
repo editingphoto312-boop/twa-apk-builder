@@ -3,44 +3,97 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TWA APK Generator</title>
+  <title>TWA APK Builder</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['"Space Mono"', 'monospace'], sans: ['"DM Sans"', 'sans-serif'] },
+          colors: { surface: '#0d0f14', panel: '#141720', border: '#1e2330', accent: '#00e5a0', dim: '#8892a4' },
+          animation: { 'pulse-slow': 'pulse 3s infinite', 'slide-up': 'slideUp 0.5s ease forwards', 'spin-slow': 'spin 2s linear infinite' },
+          keyframes: { slideUp: { '0%': { opacity: 0, transform: 'translateY(18px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } } }
+        }
+      }
+    };
+  </script>
   <style>
-    body { background: #0d0f14; font-family: sans-serif; }
-    .btn-generate { background: #00e5a0; color: #0d0f14; padding: 15px; border-radius: 10px; width: 100%; font-weight: bold; }
+    :root { color-scheme: dark; }
+    body { background: #0d0f14; font-family: 'DM Sans', sans-serif; }
+    .grid-bg { background-image: linear-gradient(rgba(0,229,160,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(0,229,160,.035) 1px, transparent 1px); background-size: 40px 40px; }
+    .field { background: #0d0f14; border: 1px solid #1e2330; border-radius: 10px; color: #e8ecf0; padding: 14px 16px; width: 100%; outline: none; transition: 0.2s; }
+    .field:focus { border-color: #00e5a0; box-shadow: 0 0 0 3px rgba(0,229,160,.12); }
+    .btn-primary, .btn-download { background: #00e5a0; color: #0d0f14; border-radius: 10px; font-family: 'Space Mono', monospace; font-weight: 700; padding: 15px 28px; width: 100%; text-align: center; cursor: pointer; transition: 0.15s; }
+    .btn-primary:hover, .btn-download:hover { opacity: .88; transform: translateY(-1px); }
+    .step-dot { width: 8px; height: 8px; border-radius: 50%; background: #1e2330; }
+    .step-dot.active { background: #00e5a0; }
   </style>
 </head>
-<body class="text-white p-10">
-  <div class="max-w-md mx-auto bg-gray-900 p-8 rounded-xl border border-gray-800">
-    <h1 class="text-2xl font-bold mb-6 text-accent">TWA Builder</h1>
-    <div class="mb-4">
-      <label class="block text-sm mb-2">Website URL</label>
-      <input id="url" type="url" class="w-full p-3 bg-black border border-gray-800 rounded text-white" placeholder="https://your-pwa.com" />
+<body class="min-h-screen grid-bg text-white">
+  <main class="max-w-xl mx-auto px-4 py-12 animate-slide-up">
+    <div class="text-center mb-10">
+      <h1 class="text-3xl font-semibold mb-4">Turn any PWA into <span class="text-accent">an APK</span></h1>
+      <p class="text-dim text-sm">Paste URL, pick a name, and download your signed APK automatically.</p>
     </div>
-    <div class="mb-4">
-      <label class="block text-sm mb-2">App Name</label>
-      <input id="appName" type="text" class="w-full p-3 bg-black border border-gray-800 rounded text-white" placeholder="My Awesome App" />
+    <div class="flex justify-center gap-2 mb-8">
+      <div class="step-dot active" id="dot-1"></div><div class="w-8 h-px bg-border my-auto"></div>
+      <div class="step-dot" id="dot-2"></div><div class="w-8 h-px bg-border my-auto"></div>
+      <div class="step-dot" id="dot-3"></div>
     </div>
-    <button class="btn-generate" onclick="handleSubmit()">⚡ Generate APK</button>
-    <p id="msg" class="mt-4 text-sm text-center text-gray-400"></p>
-  </div>
+    <div class="bg-panel border border-border rounded-2xl p-6 shadow-2xl">
+      <div id="form-section">
+        <div class="mb-5"><label class="block text-sm mb-2">Website URL *</label><input id="url" type="url" class="field" placeholder="https://your-pwa.com"/></div>
+        <div class="mb-5"><label class="block text-sm mb-2">App Name *</label><input id="appName" type="text" class="field" placeholder="My Awesome App"/></div>
+        <button class="btn-primary" onclick="handleSubmit()">⚡ Generate APK</button>
+      </div>
+      <div id="loading-section" class="hidden text-center py-4">
+        <div class="animate-spin-slow w-12 h-12 border-4 border-accent border-t-transparent rounded-full mx-auto mb-6"></div>
+        <h3 class="font-bold text-lg mb-2">Building your APK...</h3>
+        <p class="text-dim text-sm mb-4" id="poll-status">Waiting for GitHub Actions...</p>
+      </div>
+      <div id="success-section" class="hidden text-center py-4">
+        <div class="w-16 h-16 bg-accent/10 border border-accent rounded-full flex items-center justify-center mx-auto mb-5">✅</div>
+        <h3 class="font-bold text-xl mb-4">APK Ready!</h3>
+        <a id="download-btn" href="#" class="btn-download block" download>Download APK</a>
+      </div>
+    </div>
+  </main>
   <script>
+    const GH_OWNER = 'editingphoto312-boop';
+    const GH_REPO = 'twa-apk-builder';
+    const RELEASE_API = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/tags/latest`;
+    let buildTimestamp = null;
+
+    async function pollForRelease() {
+      try {
+        const res = await fetch(RELEASE_API, { cache: 'no-store' });
+        if (!res.ok) return;
+        const release = await res.json();
+        const apk = release.assets?.find(a => a.name.endsWith('.apk'));
+        const releaseDate = new Date(release.published_at);
+        if (apk && (!buildTimestamp || releaseDate > buildTimestamp)) {
+          document.getElementById('loading-section').classList.add('hidden');
+          document.getElementById('success-section').classList.remove('hidden');
+          document.getElementById('download-btn').href = apk.browser_download_url;
+          document.getElementById('dot-3').classList.add('active');
+        }
+      } catch (e) { console.error(e); }
+    }
+
     async function handleSubmit() {
       const url = document.getElementById('url').value;
       const appName = document.getElementById('appName').value;
-      const msg = document.getElementById('msg');
-      if(!url || !appName) return alert("Please fill all fields");
-      msg.innerText = "Triggering build...";
-      try {
-        const res = await fetch('/.netlify/functions/trigger-build', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, appName })
-        });
-        const data = await res.json();
-        if(res.ok) msg.innerText = "✅ Build Triggered! Check GitHub Actions.";
-        else msg.innerText = "❌ Error: " + (data.error || "Failed to start");
-      } catch(e) { msg.innerText = "❌ Failed to connect to server."; }
+      if (!url || !appName) return alert('Please fill all fields');
+      buildTimestamp = new Date();
+      document.getElementById('form-section').classList.add('hidden');
+      document.getElementById('loading-section').classList.remove('hidden');
+      document.getElementById('dot-2').classList.add('active');
+      const res = await fetch('/.netlify/functions/trigger-build', {
+        method: 'POST',
+        body: JSON.stringify({ url, appName })
+      });
+      setInterval(pollForRelease, 15000);
     }
   </script>
 </body>
