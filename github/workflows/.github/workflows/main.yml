@@ -1,0 +1,129 @@
+name: 🤖 Build TWA APK
+
+on:
+  repository_dispatch:
+    types: [build-apk]
+
+env:
+  APP_URL:    ${{ github.event.client_payload.url }}
+  APP_NAME:   ${{ github.event.client_payload.appName }}
+  PKG_ID:     ${{ github.event.client_payload.packageId }}
+
+jobs:
+  build:
+    name: Generate APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform + build tools
+        run: |
+          sdkmanager --update
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Install Bubblewrap CLI
+        run: npm install -g @bubblewrap/cli
+
+      - name: Generate Android keystore
+        run: |
+          KS_PASS="${{ secrets.KEYSTORE_PASSWORD }}"
+          KS_PASS="${KS_PASS:-android}"
+          echo "KEYSTORE_PASS=$KS_PASS" >> $GITHUB_ENV
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$GITHUB_WORKSPACE/android.keystore" \
+            -alias android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass "$KS_PASS" \
+            -keypass  "$KS_PASS" \
+            -dname "CN=TWA Generator, OU=TWA, O=TWA, L=City, S=State, C=US"
+
+      - name: Generate twa-manifest.json
+        run: |
+          node - <<'EOF'
+          const fs  = require('fs');
+          const url = process.env.APP_URL;
+          const parsed = new URL(url);
+          const host   = parsed.host;
+          const pkgId = process.env.PKG_ID ||
+            'com.twa.' + host.replace(/[^a-z0-9]/gi, '').toLowerCase();
+          const appName = process.env.APP_NAME || 'TWA App';
+          const manifest = {
+            packageId:   pkgId,
+            host,
+            name:         appName,
+            launcherName: appName.substring(0, 12),
+            display:      'standalone',
+            orientation:  'default',
+            themeColor:         '#FFFFFF',
+            navigationColor:    '#000000',
+            navigationColorDark:'#000000',
+            backgroundColor:    '#FFFFFF',
+            startUrl:  '/',
+            iconUrl:        url.replace(/\/$/, '') + '/icon-512x512.png',
+            maskableIconUrl:url.replace(/\/$/, '') + '/icon-512x512.png',
+            shortcuts: [],
+            appVersion:     '1',
+            appVersionCode: 1,
+            signingKey: {
+              path:  '../../android.keystore',
+              alias: 'android'
+            },
+            splashScreenFadeOutDuration: 300,
+            enableNotifications:         false,
+            enableSiteSettingsShortcut:  true,
+            isChromeOSOnly: false,
+            isMetaQuest:    false,
+            fullScopeUrl:   url.replace(/\/$/, '') + '/',
+            minSdkVersion:  19,
+            targetSdkVersion: 34,
+            generatorApp:   'bubblewrap-cli',
+            webManifestUrl: url.replace(/\/$/, '') + '/manifest.json',
+            fallbackType:   'customtabs',
+            features:       {},
+            alphaDependencies: { enabled: false }
+          };
+          fs.writeFileSync('twa-manifest.json', JSON.stringify(manifest, null, 2));
+          EOF
+
+      - name: Build APK with Bubblewrap
+        run: |
+          mkdir -p twa-build
+          cp twa-manifest.json twa-build/
+          cd twa-build
+          printf "%s\n%s\n" "$KEYSTORE_PASS" "$KEYSTORE_PASS" | bubblewrap build --skipPwaValidation
+
+      - name: Locate APK
+        run: |
+          APK=$(find . -name "*.apk" | head -1)
+          SAFE=$(echo "$APP_NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          cp "$APK" "${SAFE}.apk"
+          echo "APK_FILE=${SAFE}.apk" >> $GITHUB_ENV
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-apk
+          path: ${{ env.APK_FILE }}
+          retention-days: 7
+          
