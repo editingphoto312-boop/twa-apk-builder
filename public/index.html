@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TWA APK Builder</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { mono: ['"Space Mono"', 'monospace'], sans: ['"DM Sans"', 'sans-serif'] },
+          colors: { surface: '#0d0f14', panel: '#141720', border: '#1e2330', accent: '#00e5a0', dim: '#8892a4' },
+          animation: { 'pulse-slow': 'pulse 3s infinite', 'slide-up': 'slideUp 0.5s ease forwards', 'spin-slow': 'spin 2s linear infinite' },
+          keyframes: { slideUp: { '0%': { opacity: 0, transform: 'translateY(18px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } } }
+        }
+      }
+    };
+  </script>
+  <style>
+    :root { color-scheme: dark; }
+    body { background: #0d0f14; font-family: 'DM Sans', sans-serif; -webkit-font-smoothing: antialiased; }
+    .grid-bg {
+      background-image:
+        linear-gradient(rgba(0,229,160,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,160,.035) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+
+    /* ── Inputs ── */
+    .field {
+      background: #0d0f14;
+      border: 1px solid #1e2330;
+      border-radius: 10px;
+      color: #e8ecf0;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 0.95rem;
+      padding: 14px 16px;
+      width: 100%;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .field::placeholder { color: #2d3545; }
+    .field:focus { border-color: #00e5a0; box-shadow: 0 0 0 3px rgba(0,229,160,.12); }
+    .field.error { border-color: #f87171; box-shadow: 0 0 0 3px rgba(248,113,113,.12); }
+
+    /* ── Buttons ── */
+    .btn-primary, .btn-download {
+      background: #00e5a0;
+      color: #0d0f14;
+      border: none;
+      border-radius: 10px;
+      font-family: 'Space Mono', monospace;
+      font-weight: 700;
+      font-size: 0.88rem;
+      letter-spacing: .03em;
+      padding: 15px 28px;
+      width: 100%;
+      text-align: center;
+      cursor: pointer;
+      transition: opacity .15s, transform .15s;
+      display: block;
+      text-decoration: none;
+    }
+    .btn-primary:hover, .btn-download:hover { opacity: .88; transform: translateY(-1px); }
+    .btn-primary:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+
+    /* ── Step dots ── */
+    .step-dot { width: 8px; height: 8px; border-radius: 50%; background: #1e2330; transition: background .3s; }
+    .step-dot.active { background: #00e5a0; }
+
+    /* ── Icon upload dropzone ── */
+    #icon-dropzone {
+      border: 2px dashed #1e2330;
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      position: relative;
+    }
+    #icon-dropzone:hover,
+    #icon-dropzone.dragover { border-color: #00e5a0; background: rgba(0,229,160,.04); }
+    #icon-dropzone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+
+    /* ── Icon preview ── */
+    #icon-preview-wrap { display: none; }
+    #icon-preview-wrap.visible { display: flex; }
+
+    /* ── Progress bar (compression) ── */
+    #compress-bar-wrap { display: none; }
+    #compress-bar { width: 0%; transition: width .3s; }
+
+    /* Hidden canvas used for resizing */
+    #resize-canvas { display: none; }
+  </style>
+</head>
+
+<body class="min-h-screen grid-bg text-white">
+
+  <!-- Hidden canvas for image resizing -->
+  <canvas id="resize-canvas" width="512" height="512"></canvas>
+
+  <main class="max-w-xl mx-auto px-4 py-12 animate-slide-up">
+
+    <!-- Hero -->
+    <div class="text-center mb-10">
+      <p class="font-mono text-accent text-xs tracking-widest uppercase mb-3">No Code Required</p>
+      <h1 class="text-3xl font-semibold mb-4">
+        Turn any PWA into <span class="text-accent">an Android APK</span>
+      </h1>
+      <p class="text-dim text-sm">Paste your URL, upload an icon, and download your signed APK automatically.</p>
+    </div>
+
+    <!-- Step dots -->
+    <div class="flex justify-center items-center gap-2 mb-8">
+      <div class="step-dot active" id="dot-1"></div>
+      <div class="w-8 h-px bg-border"></div>
+      <div class="step-dot" id="dot-2"></div>
+      <div class="w-8 h-px bg-border"></div>
+      <div class="step-dot" id="dot-3"></div>
+    </div>
+
+    <!-- Card -->
+    <div class="bg-panel border border-border rounded-2xl p-6 sm:p-8 shadow-2xl">
+
+      <!-- ① Form -->
+      <div id="form-section">
+
+        <!-- URL -->
+        <div class="mb-5">
+          <label class="block text-sm font-medium mb-2" for="url">
+            Website URL <span class="text-accent">*</span>
+          </label>
+          <input id="url" type="url" class="field" placeholder="https://your-pwa.com"
+            autocomplete="url" inputmode="url" />
+        </div>
+
+        <!-- App Name -->
+        <div class="mb-5">
+          <label class="block text-sm font-medium mb-2" for="appName">
+            App Name <span class="text-accent">*</span>
+          </label>
+          <input id="appName" type="text" class="field" placeholder="My Awesome App"
+            maxlength="30" autocomplete="off" />
+        </div>
+
+        <!-- Package ID -->
+        <div class="mb-6">
+          <label class="block text-sm font-medium mb-2" for="packageId">
+            Package ID <span class="text-dim font-normal">(optional)</span>
+          </label>
+          <input id="packageId" type="text" class="field" placeholder="com.example.myapp"
+            autocomplete="off" />
+          <p class="text-xs text-dim mt-1.5">Auto-generated from your URL if blank</p>
+        </div>
+
+        <!-- ── Icon Upload ──────────────────────────────────────────── -->
+        <div class="mb-7">
+          <label class="block text-sm font-medium mb-2">
+            App Icon <span class="text-dim font-normal">(optional — PNG recommended)</span>
+          </label>
+
+          <!-- Dropzone -->
+          <div id="icon-dropzone">
+            <input type="file" id="icon-file" accept="image/png,image/jpeg,image/webp,image/gif"
+              onchange="handleIconFile(this.files[0])" />
+            <div id="dropzone-inner">
+              <!-- Upload icon -->
+              <svg class="w-8 h-8 text-dim mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+              </svg>
+              <p class="text-sm text-dim">
+                <span class="text-accent font-semibold">Click to upload</span> or drag &amp; drop
+              </p>
+              <p class="text-xs text-dim mt-1">PNG / JPG / WEBP · Any size · Auto-resized to 512×512</p>
+            </div>
+          </div>
+
+          <!-- Preview + info (shown after upload) -->
+          <div id="icon-preview-wrap" class="items-center gap-4 mt-3">
+            <img id="icon-preview" src="" alt="Icon preview"
+              class="w-14 h-14 rounded-xl border border-border object-cover flex-shrink-0" />
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-white truncate" id="icon-filename">—</p>
+              <p class="text-xs text-dim" id="icon-info">Resizing…</p>
+              <!-- Compression progress bar -->
+              <div id="compress-bar-wrap" class="mt-2">
+                <div class="w-full bg-border rounded-full h-1.5">
+                  <div id="compress-bar" class="bg-accent h-1.5 rounded-full"></div>
+                </div>
+                <p class="text-xs text-dim mt-1" id="compress-label">Compressing…</p>
+              </div>
+            </div>
+            <button onclick="clearIcon()"
+              class="text-dim hover:text-red-400 transition-colors flex-shrink-0 ml-auto"
+              title="Remove icon">
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <!-- ── /Icon Upload ─────────────────────────────────────────── -->
+
+        <!-- Error -->
+        <p id="error-msg" class="text-red-400 text-sm mb-4 hidden"></p>
+
+        <button class="btn-primary" id="generate-btn" onclick="handleSubmit()">
+          ⚡ Generate APK
+        </button>
+      </div>
+
+      <!-- ② Loading / polling -->
+      <div id="loading-section" class="hidden text-center py-4">
+        <div class="animate-spin-slow w-12 h-12 border-4 border-accent border-t-transparent
+                    rounded-full mx-auto mb-6"></div>
+        <h3 class="font-bold text-lg mb-2">Building your APK…</h3>
+        <p class="text-dim text-sm mb-4" id="poll-status">Waiting for GitHub Actions…</p>
+        <p class="text-xs text-dim">Usually takes 5–10 minutes. This page polls automatically.</p>
+      </div>
+
+      <!-- ③ Success -->
+      <div id="success-section" class="hidden text-center py-4">
+        <div class="w-16 h-16 bg-accent/10 border border-accent/30 rounded-full
+                    flex items-center justify-center mx-auto mb-5 text-3xl">✅</div>
+        <h3 class="font-mono font-bold text-xl mb-1">APK Ready!</h3>
+        <p class="text-dim text-xs mb-6" id="release-timestamp"></p>
+        <a id="download-btn" href="#" class="btn-download mb-4" download>
+          ⬇ Download APK
+        </a>
+        <p class="text-xs text-dim mt-4" id="apk-filename"></p>
+        <button onclick="resetForm()"
+          class="text-xs text-dim hover:text-white underline underline-offset-2 mt-4 transition-colors">
+          Build another APK →
+        </button>
+      </div>
+
+    </div><!-- /card -->
+
+    <!-- Requirements note -->
+    <div class="mt-6 bg-panel border border-border rounded-xl p-4 text-xs text-dim leading-relaxed">
+      <span class="text-accent font-semibold">Requirements: </span>
+      Your site needs <strong class="text-white">HTTPS</strong>,
+      a <strong class="text-white">Web App Manifest</strong>,
+      and ideally a <strong class="text-white">512×512 icon</strong>.
+      Upload one above and we'll embed it automatically.
+    </div>
+  </main>
+
+  <!-- ── Scripts ──────────────────────────────────────────────────────────── -->
+  <script>
+    // ═══════════════════════════════════════════════════════════════════════
+    // CONFIG
+    // ═══════════════════════════════════════════════════════════════════════
+    const GH_OWNER      = 'editingphoto312-boop';
+    const GH_REPO       = 'twa-apk-builder';
+    const RELEASE_API   = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/tags/latest`;
+    const POLL_INTERVAL = 15_000;   // 15 s
+    const POLL_TIMEOUT  = 15 * 60 * 1000; // 15 min
+
+    // GitHub repository_dispatch payload hard limit is 64 KB total.
+    // The JSON wrapper (url, appName, etc.) costs ~200 bytes, so the
+    // base64 icon string must stay under 60,000 characters to be safe.
+    const MAX_BASE64_BYTES = 60_000;
+
+    // ── State ────────────────────────────────────────────────────────────
+    let iconBase64      = null;   // final compressed base64 string (no prefix)
+    let buildTimestamp  = null;
+    let pollTimer       = null;
+    let pollStart       = null;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ICON: resize → compress → preview
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Entry point called by <input onchange> and drag-drop.
+     * @param {File} file
+     */
+    async function handleIconFile(file) {
+      if (!file || !file.type.startsWith('image/')) {
+        showError('Please upload a valid image file (PNG, JPG, WEBP).');
+        return;
+      }
+
+      // Show preview name immediately
+      document.getElementById('icon-filename').textContent = file.name;
+      document.getElementById('icon-info').textContent     = 'Resizing to 512×512…';
+      document.getElementById('icon-preview-wrap').classList.add('visible');
+      document.getElementById('icon-dropzone').style.display = 'none';
+
+      try {
+        // 1. Decode the file into an Image element
+        const img = await fileToImage(file);
+
+        // 2. Draw onto 512×512 canvas (high-quality downscale)
+        const canvas = document.getElementById('resize-canvas');
+        const ctx    = canvas.getContext('2d');
+        ctx.clearRect(0, 0, 512, 512);
+
+        // Fill white background (avoids transparent-PNG → black-APK-icon issues)
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 512, 512);
+
+        // Draw image centred & scaled to fill (cover behaviour)
+        const scale  = Math.max(512 / img.naturalWidth, 512 / img.naturalHeight);
+        const dw     = img.naturalWidth  * scale;
+        const dh     = img.naturalHeight * scale;
+        const dx     = (512 - dw) / 2;
+        const dy     = (512 - dh) / 2;
+        ctx.drawImage(img, dx, dy, dw, dh);
+
+        // Set thumbnail preview
+        document.getElementById('icon-preview').src = canvas.toDataURL('image/png');
+
+        // 3. Compress iteratively until base64 fits within limit
+        document.getElementById('compress-bar-wrap').style.display = 'block';
+        document.getElementById('compress-label').textContent = 'Compressing…';
+
+        const base64 = await compressToLimit(canvas);
+        iconBase64   = base64;
+
+        const kb = Math.round((base64.length * 3) / 4 / 1024);
+        document.getElementById('icon-info').textContent     = `512×512 · ${kb} KB (ready)`;
+        document.getElementById('compress-label').textContent = `✅ Done — ${kb} KB`;
+        setBar(100);
+
+      } catch (err) {
+        console.error('Icon processing error:', err);
+        document.getElementById('icon-info').textContent = '⚠️ Failed to process image.';
+        iconBase64 = null;
+      }
+    }
+
+    /** Load a File into an HTMLImageElement */
+    function fileToImage(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload  = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
+        img.src = url;
+      });
+    }
+
+    /**
+     * Aggressively compress the 512×512 canvas until the base64 string
+     * fits within MAX_BASE64_BYTES (60,000 chars).
+     *
+     * Strategy:
+     *  1. Skip PNG entirely — a 512×512 PNG is almost always > 60 KB base64.
+     *  2. Start JPEG at quality 0.7 (good enough for an icon) and drop fast.
+     *  3. If still too big after quality 0.05, shrink the canvas to 256×256
+     *     and retry — this is the nuclear option that always succeeds.
+     *
+     * @param {HTMLCanvasElement} canvas  — 512×512 source canvas
+     * @returns {Promise<string>}         — raw base64, no data-URL prefix
+     */
+    async function compressToLimit(canvas) {
+      // Aggressive quality ladder: start at 0.7 and drop quickly
+      const qualities = [0.70, 0.55, 0.40, 0.28, 0.18, 0.10, 0.05];
+
+      for (let i = 0; i < qualities.length; i++) {
+        const q   = qualities[i];
+        const b64 = stripPrefix(canvas.toDataURL('image/jpeg', q));
+
+        const pct = Math.round(((i + 1) / (qualities.length + 1)) * 90);
+        setBar(pct);
+        document.getElementById('compress-label').textContent =
+          `Compressing… quality ${Math.round(q * 100)}% → ${Math.round(b64.length / 1024)} KB`;
+
+        await microtask(); // let the browser repaint the progress bar
+
+        if (b64.length <= MAX_BASE64_BYTES) {
+          setBar(100);
+          return b64;
+        }
+      }
+
+      // ── Nuclear option: resize canvas to 256×256 then retry ──────────────
+      document.getElementById('compress-label').textContent =
+        'Image still large — downscaling to 256×256…';
+      await microtask();
+
+      const small = document.createElement('canvas');
+      small.width = small.height = 256;
+      small.getContext('2d').drawImage(canvas, 0, 0, 256, 256);
+
+      const fallbackQualities = [0.70, 0.50, 0.30, 0.15, 0.05];
+      let   last = '';
+
+      for (let i = 0; i < fallbackQualities.length; i++) {
+        const q   = fallbackQualities[i];
+        const b64 = stripPrefix(small.toDataURL('image/jpeg', q));
+
+        const pct = 90 + Math.round(((i + 1) / fallbackQualities.length) * 10);
+        setBar(pct);
+        document.getElementById('compress-label').textContent =
+          `256×256 fallback — quality ${Math.round(q * 100)}% → ${Math.round(b64.length / 1024)} KB`;
+        await microtask();
+
+        last = b64;
+        if (b64.length <= MAX_BASE64_BYTES) break; // done
+      }
+
+      setBar(100);
+      return last; // return smallest result regardless
+    }
+
+    /** Strip "data:image/xxx;base64," prefix */
+    function stripPrefix(dataUrl) {
+      return dataUrl.split(',')[1] || '';
+    }
+
+    /** Update the green progress bar (0–100) */
+    function setBar(pct) {
+      document.getElementById('compress-bar').style.width = pct + '%';
+    }
+
+    /** Yield to the event loop for one microtask tick */
+    function microtask() {
+      return new Promise(r => setTimeout(r, 0));
+    }
+
+    /** Clear the icon selection and reset UI */
+    function clearIcon() {
+      iconBase64 = null;
+      document.getElementById('icon-file').value         = '';
+      document.getElementById('icon-preview').src        = '';
+      document.getElementById('icon-preview-wrap').classList.remove('visible');
+      document.getElementById('icon-dropzone').style.display = '';
+      document.getElementById('compress-bar-wrap').style.display = 'none';
+      setBar(0);
+    }
+
+    // Drag-and-drop support on the dropzone
+    const dz = document.getElementById('icon-dropzone');
+    dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('dragover'); });
+    dz.addEventListener('dragleave', ()=> dz.classList.remove('dragover'));
+    dz.addEventListener('drop', e => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      const file = e.dataTransfer?.files?.[0];
+      if (file) handleIconFile(file);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FORM VALIDATION
+    // ═══════════════════════════════════════════════════════════════════════
+    function showError(msg) {
+      const el = document.getElementById('error-msg');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+    function clearError() {
+      document.getElementById('error-msg').classList.add('hidden');
+    }
+
+    function validate(url, appName) {
+      clearError();
+      document.getElementById('url').classList.remove('error');
+      document.getElementById('appName').classList.remove('error');
+
+      if (!url) {
+        document.getElementById('url').classList.add('error');
+        showError('Please enter your website URL.');
+        return false;
+      }
+      try {
+        const p = new URL(url);
+        if (!['http:','https:'].includes(p.protocol)) throw 0;
+      } catch {
+        document.getElementById('url').classList.add('error');
+        showError('Please enter a valid http/https URL.');
+        return false;
+      }
+      if (!appName) {
+        document.getElementById('appName').classList.add('error');
+        showError('Please enter an app name.');
+        return false;
+      }
+      if (appName.length > 30) {
+        document.getElementById('appName').classList.add('error');
+        showError('App name must be 30 characters or fewer.');
+        return false;
+      }
+      return true;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // GITHUB RELEASE POLLING
+    // ═══════════════════════════════════════════════════════════════════════
+    async function pollForRelease() {
+      const elapsed = Date.now() - pollStart;
+      const m = Math.floor(elapsed / 60000);
+      const s = Math.floor((elapsed % 60000) / 1000);
+      document.getElementById('poll-status').textContent =
+        `Checking GitHub for your APK… (${m}m ${s}s elapsed)`;
+
+      if (elapsed > POLL_TIMEOUT) {
+        clearInterval(pollTimer);
+        document.getElementById('poll-status').textContent =
+          '⚠️ Timed out. Check GitHub Actions manually.';
+        return;
+      }
+
+      try {
+        const res = await fetch(RELEASE_API, {
+          headers: { Accept: 'application/vnd.github+json' },
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+
+        const release = await res.json();
+        const apk     = release.assets?.find(a => a.name.toLowerCase().endsWith('.apk'));
+        const relDate  = new Date(release.published_at);
+
+        if (apk && (!buildTimestamp || relDate > buildTimestamp)) {
+          clearInterval(pollTimer);
+
+          document.getElementById('loading-section').classList.add('hidden');
+          document.getElementById('success-section').classList.remove('hidden');
+          document.getElementById('dot-3').classList.add('active');
+
+          document.getElementById('download-btn').href = apk.browser_download_url;
+          document.getElementById('download-btn').setAttribute('download', apk.name);
+          document.getElementById('apk-filename').textContent = apk.name;
+          document.getElementById('release-timestamp').textContent =
+            `Built at ${new Date(release.published_at).toLocaleString()}`;
+        }
+      } catch (err) {
+        console.warn('Poll error:', err.message);
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SUBMIT
+    // ═══════════════════════════════════════════════════════════════════════
+    async function handleSubmit() {
+      const url       = document.getElementById('url').value.trim();
+      const appName   = document.getElementById('appName').value.trim();
+      const packageId = document.getElementById('packageId').value.trim();
+
+      if (!validate(url, appName)) return;
+
+      // If the user uploaded an icon but it's still processing, wait a moment
+      const iconFileInput = document.getElementById('icon-file');
+      if (iconFileInput.files.length > 0 && !iconBase64) {
+        showError('Icon is still processing. Please wait a moment and try again.');
+        return;
+      }
+
+      // Switch to loading UI
+      buildTimestamp = new Date();
+      document.getElementById('form-section').classList.add('hidden');
+      document.getElementById('loading-section').classList.remove('hidden');
+      document.getElementById('dot-2').classList.add('active');
+
+      try {
+        const body = { url, appName, packageId };
+
+        if (iconBase64) {
+          // Final size guard — reject if still somehow over the limit
+          if (iconBase64.length > MAX_BASE64_BYTES) {
+            throw new Error(
+              `Icon is too large for the GitHub API (${Math.round(iconBase64.length / 1024)} KB). ` +
+              `Try a smaller or simpler image.`
+            );
+          }
+          body.icon_base64 = iconBase64;
+          console.log(
+            `✅ Sending icon_base64: ${iconBase64.length} chars ` +
+            `(~${Math.round(iconBase64.length / 1024)} KB) — under 60 KB limit ✓`
+          );
+        } else {
+          console.log('ℹ️ No icon uploaded — sending without icon_base64.');
+        }
+
+        const res  = await fetch('/.netlify/functions/trigger-build', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        });
+        const data = await res.json();
+
+        if (!res.ok || data.error) throw new Error(data.error || 'Unknown error');
+
+        // Start polling
+        pollStart = Date.now();
+        pollTimer = setInterval(pollForRelease, POLL_INTERVAL);
+        pollForRelease();
+
+      } catch (err) {
+        // Revert to form
+        clearInterval(pollTimer);
+        document.getElementById('loading-section').classList.add('hidden');
+        document.getElementById('form-section').classList.remove('hidden');
+        document.getElementById('dot-2').classList.remove('active');
+        showError(err.message || 'Something went wrong. Please try again.');
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // RESET
+    // ═══════════════════════════════════════════════════════════════════════
+    function resetForm() {
+      clearInterval(pollTimer);
+      buildTimestamp = null;
+      iconBase64     = null;
+
+      ['url','appName','packageId'].forEach(id => {
+        document.getElementById(id).value = '';
+        document.getElementById(id).classList.remove('error');
+      });
+      clearError();
+      clearIcon();
+
+      document.getElementById('success-section').classList.add('hidden');
+      document.getElementById('form-section').classList.remove('hidden');
+      document.getElementById('dot-2').classList.remove('active');
+      document.getElementById('dot-3').classList.remove('active');
+      document.getElementById('poll-status').textContent = 'Waiting for GitHub Actions…';
+    }
+
+    // Enter key submits
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !document.getElementById('form-section').classList.contains('hidden'))
+        handleSubmit();
+    });
+  </script>
+</body>
+</html>
+
+
+    // ═════════════════════════════════════════════════
