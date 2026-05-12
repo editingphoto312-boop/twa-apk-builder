@@ -1,0 +1,12 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+  command = "echo 'Nothing to build'"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/trigger-build"
+  to = "/.netlify/functions/trigger-build"
+  status = 200
