@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TWA APK Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0d0f14; font-family: sans-serif; }
+    .btn-generate { background: #00e5a0; color: #0d0f14; padding: 15px; border-radius: 10px; width: 100%; font-weight: bold; }
+  </style>
+</head>
+<body class="text-white p-10">
+  <div class="max-w-md mx-auto bg-gray-900 p-8 rounded-xl border border-gray-800">
+    <h1 class="text-2xl font-bold mb-6 text-accent">TWA Builder</h1>
+    <div class="mb-4">
+      <label class="block text-sm mb-2">Website URL</label>
+      <input id="url" type="url" class="w-full p-3 bg-black border border-gray-800 rounded text-white" placeholder="https://your-pwa.com" />
+    </div>
+    <div class="mb-4">
+      <label class="block text-sm mb-2">App Name</label>
+      <input id="appName" type="text" class="w-full p-3 bg-black border border-gray-800 rounded text-white" placeholder="My Awesome App" />
+    </div>
+    <button class="btn-generate" onclick="handleSubmit()">⚡ Generate APK</button>
+    <p id="msg" class="mt-4 text-sm text-center text-gray-400"></p>
+  </div>
+  <script>
+    async function handleSubmit() {
+      const url = document.getElementById('url').value;
+      const appName = document.getElementById('appName').value;
+      const msg = document.getElementById('msg');
+      if(!url || !appName) return alert("Please fill all fields");
+      msg.innerText = "Triggering build...";
+      try {
+        const res = await fetch('/.netlify/functions/trigger-build', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, appName })
+        });
+        const data = await res.json();
+        if(res.ok) msg.innerText = "✅ Build Triggered! Check GitHub Actions.";
+        else msg.innerText = "❌ Error: " + (data.error || "Failed to start");
+      } catch(e) { msg.innerText = "❌ Failed to connect to server."; }
+    }
+  </script>
+</body>
+</html>
