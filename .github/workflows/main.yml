@@ -1,0 +1,380 @@
+name: Build TWA APK
+
+on:
+  repository_dispatch:
+    types: [build-apk]
+
+permissions:
+  contents: write
+
+env:
+  APP_URL:  "${{ github.event.client_payload.url }}"
+  APP_NAME: "${{ github.event.client_payload.appName }}"
+  PKG_ID:   "${{ github.event.client_payload.packageId }}"
+
+jobs:
+  build:
+    name: Generate & Release APK
+    runs-on: ubuntu-latest
+    # FIX 1: Increased from 30 to 60 minutes.
+    # sdkmanager --update alone took 10-15 min (now removed), plus
+    # Gradle first-run download takes 5-10 min → 30 min was too tight.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # FIX 2: Removed `sdkmanager --update` — this was the #1 cause of timeout.
+      # `--update` re-downloads ALL installed SDK packages and their metadata,
+      # which easily takes 10-15 minutes on GitHub-hosted runners.
+      # We only need the two specific packages below; --update is not needed.
+      - name: Install Android platform + build tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      # FIX 3: Cache Gradle files so repeated runs skip re-downloading.
+      # First run still downloads (~200 MB), but every run after is fast.
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Install Bubblewrap CLI
+        run: npm install -g @bubblewrap/cli
+
+      - name: Generate Android keystore
+        run: |
+          KS_PASS="${{ secrets.KEYSTORE_PASSWORD }}"
+          KS_PASS="${KS_PASS:-android}"
+          echo "KEYSTORE_PASS=$KS_PASS" >> $GITHUB_ENV
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$GITHUB_WORKSPACE/android.keystore" \
+            -alias android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass "$KS_PASS" \
+            -keypass  "$KS_PASS" \
+            -dname "CN=TWA Builder, OU=TWA, O=TWA, L=City, S=State, C=US"
+
+          echo "Keystore created at $GITHUB_WORKSPACE/android.keystore"
+
+      - name: Generate twa-manifest.json
+        run: |
+          node - <<'EOF'
+          const fs  = require('fs');
+          const url = process.env.APP_URL;
+          const parsed = new URL(url);
+          const host   = parsed.host;
+
+          const pkgId = process.env.PKG_ID ||
+            'com.twa.' + host.replace(/[^a-z0-9]/gi, '').toLowerCase();
+
+          const appName  = process.env.APP_NAME || 'TWA App';
+          const ksPath   = process.env.GITHUB_WORKSPACE + '/android.keystore';
+          const ksPass   = process.env.KEYSTORE_PASS || 'android';
+
+          const manifest = {
+            packageId:   pkgId,
+            host,
+            name:         appName,
+            launcherName: appName.substring(0, 12),
+            display:      'standalone',
+            orientation:  'default',
+            themeColor:          '#FFFFFF',
+            navigationColor:     '#000000',
+            navigationColorDark: '#000000',
+            backgroundColor:     '#FFFFFF',
+            startUrl:  '/',
+            iconUrl:        url.replace(/\/$/, '') + '/icon-512x512.png',
+            maskableIconUrl:url.replace(/\/$/, '') + '/icon-512x512.png',
+            shortcuts: [],
+            appVersion:     '1',
+            appVersionCode: 1,
+            signingKey: {
+              path:          ksPath,
+              alias:         'android',
+              keyPassword:   ksPass,
+              storePassword: ksPass
+            },
+            splashScreenFadeOutDuration: 300,
+            enableNotifications:        false,
+            enableSiteSettingsShortcut: true,
+            isChromeOSOnly: false,
+            isMetaQuest:    false,
+            fullScopeUrl:   url.replace(/\/$/, '') + '/',
+            minSdkVersion:  19,
+            targetSdkVersion: 34,
+            generatorApp:   'bubblewrap-cli',
+            webManifestUrl: url.replace(/\/$/, '') + '/manifest.json',
+            fallbackType:   'customtabs',
+            features:       {},
+            alphaDependencies: { enabled: false }
+          };
+
+          fs.writeFileSync('twa-manifest.json', JSON.stringify(manifest, null, 2));
+          console.log('twa-manifest.json generated');
+          console.log('   Package ID:', pkgId);
+          console.log('   Host:      ', host);
+          console.log('   App name:  ', appName);
+          console.log('   Keystore:  ', ksPath);
+          EOF
+
+      # FIX 4: Write config.json DIRECTLY — skip bubblewrap updateConfig entirely.
+      #
+      # ROOT CAUSE of exit code 130 in "Configure" step:
+      #   `bubblewrap updateConfig --jdkPath=... --androidSdkPath=...`
+      #   still asks "Do you want Bubblewrap to install the JDK? (Y/n)"
+      #   BEFORE applying the flags. With no stdin it gets SIGINT → exit 130.
+      #
+      # FIX: Write ~/.bubblewrap/config.json directly with Node.js.
+      #   This is exactly what updateConfig writes internally, so bubblewrap
+      #   reads it the same way — but with zero interactive prompts.
+      - name: Configure Bubblewrap SDK paths (non-interactive)
+        run: |
+          JAVA_HOME_PATH="${JAVA_HOME}"
+          ANDROID_SDK_PATH="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+
+          echo "Java home:   $JAVA_HOME_PATH"
+          echo "Android SDK: $ANDROID_SDK_PATH"
+
+          # Write config.json directly — no prompts, no stdin needed
+          mkdir -p ~/.bubblewrap
+          node -e "
+            const fs = require('fs');
+            const cfg = {
+              jdkPath: process.env.JAVA_HOME_PATH,
+              androidSdkPath: process.env.ANDROID_SDK_PATH
+            };
+            fs.writeFileSync(
+              process.env.HOME + '/.bubblewrap/config.json',
+              JSON.stringify(cfg, null, 2)
+            );
+            console.log('Config written:', JSON.stringify(cfg));
+          " JAVA_HOME_PATH="$JAVA_HOME_PATH" ANDROID_SDK_PATH="$ANDROID_SDK_PATH"
+
+          echo "Bubblewrap config:"
+          cat ~/.bubblewrap/config.json
+
+      - name: Build APK with Bubblewrap
+        # FIX 5: Per-step timeout so this step never silently hangs the whole job.
+        timeout-minutes: 45
+        run: |
+          mkdir -p twa-build
+          cp twa-manifest.json twa-build/
+          cd twa-build
+
+          # ── 1. Generate placeholder icon (512×512 solid-color PNG) ──────────
+          python3 - << 'GENICON'
+          import struct, zlib, os
+
+          def solid_png(width=512, height=512, r=66, g=133, b=244):
+              sig = b'\x89PNG\r\n\x1a\n'
+
+              ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+              ihdr_crc  = zlib.crc32(b'IHDR' + ihdr_data) & 0xFFFFFFFF
+              ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+
+              row  = b'\x00' + bytes([r, g, b]) * width
+              raw  = row * height
+              comp = zlib.compress(raw, 9)
+              idat_crc = zlib.crc32(b'IDAT' + comp) & 0xFFFFFFFF
+              idat = struct.pack('>I', len(comp)) + b'IDAT' + comp + struct.pack('>I', idat_crc)
+
+              iend_crc = zlib.crc32(b'IEND') & 0xFFFFFFFF
+              iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+
+              return sig + ihdr + idat + iend
+
+          os.makedirs('/tmp/twa-local-server', exist_ok=True)
+          with open('/tmp/twa-local-server/icon-512x512.png', 'wb') as f:
+              f.write(solid_png())
+          print('Placeholder icon written (512x512 PNG)')
+          GENICON
+
+          # ── 2. Create local web manifest ─────────────────────────────────────
+          node - << 'GENWEBMANIFEST'
+          const fs = require('fs');
+          const m  = JSON.parse(fs.readFileSync('./twa-manifest.json', 'utf8'));
+
+          const webManifest = {
+            name:             m.name,
+            short_name:       m.launcherName || m.name.substring(0, 12),
+            start_url:        m.startUrl  || '/',
+            scope:            '/',
+            display:          m.display   || 'standalone',
+            orientation:      m.orientation || 'any',
+            background_color: m.backgroundColor || '#ffffff',
+            theme_color:      m.themeColor      || '#ffffff',
+            icons: [
+              {
+                src:   'http://127.0.0.1:3333/icon-512x512.png',
+                sizes: '512x512',
+                type:  'image/png'
+              },
+              {
+                src:     'http://127.0.0.1:3333/icon-512x512.png',
+                sizes:   '512x512',
+                type:    'image/png',
+                purpose: 'maskable'
+              }
+            ],
+            shortcuts: m.shortcuts || []
+          };
+
+          fs.writeFileSync(
+            '/tmp/twa-local-server/manifest.json',
+            JSON.stringify(webManifest, null, 2)
+          );
+
+          fs.writeFileSync(
+            '/tmp/twa-local-server/index.html',
+            `<!DOCTYPE html><html><head><link rel="manifest" href="/manifest.json"><title>${m.name}</title></head><body></body></html>`
+          );
+          console.log('Local web manifest created');
+          GENWEBMANIFEST
+
+          # ── 3. Start local HTTP server ────────────────────────────────────────
+          python3 -m http.server 3333 \
+            --directory /tmp/twa-local-server \
+            --bind 127.0.0.1 \
+            > /tmp/httpserver.log 2>&1 &
+          HTTP_PID=$!
+
+          for i in $(seq 1 10); do
+            curl -sf http://127.0.0.1:3333/manifest.json > /dev/null 2>&1 \
+              && echo "Local manifest server ready (${i}s)" && break
+            sleep 1
+          done
+
+          curl -sf http://127.0.0.1:3333/manifest.json > /dev/null 2>&1 \
+            || { echo "ERROR: local HTTP server did not start"; cat /tmp/httpserver.log; exit 1; }
+
+          # ── 4. Patch twa-manifest.json URLs → localhost ──────────────────────
+          node - << 'PATCHMANIFEST'
+          const fs = require('fs');
+          const m  = JSON.parse(fs.readFileSync('./twa-manifest.json', 'utf8'));
+
+          m.webManifestUrl  = 'http://127.0.0.1:3333/manifest.json';
+          m.iconUrl         = 'http://127.0.0.1:3333/icon-512x512.png';
+          m.maskableIconUrl = 'http://127.0.0.1:3333/icon-512x512.png';
+
+          fs.writeFileSync('./twa-manifest.json', JSON.stringify(m, null, 2));
+          console.log('twa-manifest.json patched → all URLs point to localhost');
+          PATCHMANIFEST
+
+          # ── 5. Build ──────────────────────────────────────────────────────────
+          # FIX 6: Correct stdin input for bubblewrap prompts.
+          #
+          # Bubblewrap prompt ORDER when config paths are set but it still asks:
+          #   Prompt 1: "Do you want Bubblewrap to install JDK? (Y/n)"     → answer: n
+          #   Prompt 2: "Do you want Bubblewrap to install Android SDK? (Y/n)" → answer: n
+          #   Prompt 3+: Field confirmations from `update` (app name, pkg, etc.) → answer: <Enter> (accept default)
+          #
+          # OLD (WRONG): `yes ""` sends empty string to ALL prompts.
+          #   Empty string on prompt 1/2 = accept default = "Y" = tries to
+          #   download JDK/SDK inside CI → slow/broken → timeout.
+          #
+          # NEW (CORRECT): Send "n" for the first two prompts, then empty
+          #   lines to accept defaults for all remaining field prompts.
+          printf 'n\nn\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n' \
+            | bubblewrap build --skipPwaValidation 2>&1 || true
+
+          # ── 6. Stop local server ─────────────────────────────────────────────
+          kill $HTTP_PID 2>/dev/null || true
+
+          # ── 7. Verify APK ────────────────────────────────────────────────────
+          APK_CHECK=$(find . -name "*release*.apk" 2>/dev/null | grep -v unsigned | head -1)
+          if [ -z "$APK_CHECK" ]; then
+            APK_CHECK=$(find . -name "*.apk" 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$APK_CHECK" ]; then
+            echo "Build failed - no APK produced. Showing last Gradle output:"
+            find . -name "*.log" 2>/dev/null -exec tail -50 {} \; || true
+            find . -path "*/build/outputs" 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          echo "APK found: $APK_CHECK"
+
+      - name: Locate APK
+        run: |
+          APK=$(find . -name "*release*.apk" 2>/dev/null | grep -v unsigned | head -1)
+          if [ -z "$APK" ]; then
+            APK=$(find . -name "*.apk" 2>/dev/null | head -1)
+          fi
+          if [ -z "$APK" ]; then
+            echo "No APK found — check the build logs above."
+            exit 1
+          fi
+          SAFE=$(echo "$APP_NAME" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          FINAL="${SAFE}.apk"
+          cp "$APK" "$FINAL"
+          echo "APK_FILE=$FINAL" >> $GITHUB_ENV
+          echo "APK_LABEL=$SAFE" >> $GITHUB_ENV
+          echo "APK ready: $FINAL"
+
+      - name: Delete old 'latest' release (if exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          git push origin --delete refs/tags/latest 2>/dev/null || true
+
+      - name: Create GitHub Release and upload APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TIMESTAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          gh release create latest "${{ env.APK_FILE }}" \
+            --repo "${{ github.repository }}" \
+            --title "Latest Build - ${APP_NAME}" \
+            --notes "## APK Ready
+
+          | Field | Value |
+          |---|---|
+          | **App Name** | ${APP_NAME} |
+          | **Source URL** | ${APP_URL} |
+          | **Built at** | ${TIMESTAMP} |
+
+          ### How to install
+          1. Download the \`.apk\` file below
+          2. Enable *Install from unknown sources* on your Android device
+          3. Open the file to install" \
+            --latest
+
+          echo "Release: https://github.com/${{ github.repository }}/releases/tag/latest"
+
+      - name: Job summary
+        run: |
+          echo "## APK Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **App** | $APP_NAME |" >> $GITHUB_STEP_SUMMARY
+          echo "| **URL** | $APP_URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Release** | [Download APK](https://github.com/${{ github.repository }}/releases/tag/latest) |" >> $GITHUB_STEP_SUMMARY
+          
